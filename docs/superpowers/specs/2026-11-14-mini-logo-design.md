@@ -148,10 +148,16 @@ Run after an edit.
 A line whose command is unknown, or whose argument is missing or not a
 number, is a parse error. On entering run mode:
 
-- every bad line is given an `.err` class,
-- the status bar shows the first one, as `line 4: unknown command "fwd"`,
-- neither Step nor Run starts; the program stays in edit mode until
-  the source is corrected.
+- neither Step nor Run starts; the program stays in edit mode,
+- the status bar names the first one, as `line 4: unknown command "fwd"`,
+- the textarea takes focus and selects that line, so the typo can be fixed
+  in place.
+
+An earlier draft also gave each bad line an `.err` class. That was dropped:
+the class can only appear on the read-only run-mode listing, which is not
+on screen while the source is still editable. Naming the line and selecting
+it in the textarea is the same information, in the view the user is
+actually looking at.
 
 Parse errors are reported for the whole program at once, not one per run
 attempt.

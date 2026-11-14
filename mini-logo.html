@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mini-logo</title>
+<style>
+:root{
+  --bg:#0e1116; --panel:#161b22; --line:#232a33; --fg:#e6edf3; --dim:#8b949e;
+  --accent:#4ea1ff; --cur:#1f3a57; --err:#f85149; --ink:#7ee787;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);display:flex;flex-direction:column;
+  font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+header{
+  display:flex;gap:8px;align-items:center;padding:10px 14px;
+  border-bottom:1px solid var(--line);background:var(--panel);
+}
+button,select{
+  font:inherit;color:var(--fg);background:#1f2630;border:1px solid var(--line);
+  border-radius:6px;padding:6px 12px;cursor:pointer;
+}
+button:hover,select:hover{border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:default;border-color:var(--line)}
+h1{font-size:14px;font-weight:600;margin:0 10px 0 0;letter-spacing:.02em}
+h1 span{color:var(--accent)}
+#status{margin-left:auto;color:var(--dim);font-variant-numeric:tabular-nums}
+#status.err{color:var(--err)}
+main{flex:1;display:flex;min-height:0}
+#left{width:min(44%,540px);display:flex;border-right:1px solid var(--line)}
+#src,#listing{
+  flex:1;margin:0;padding:14px 14px 40vh;background:var(--panel);color:var(--fg);
+  font:13px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  border:0;outline:none;resize:none;overflow:auto;white-space:pre;
+}
+#listing{counter-reset:ln}
+#listing div{padding:0 6px;border-radius:4px;min-height:1.7em}
+#listing div::before{
+  counter-increment:ln;content:counter(ln);display:inline-block;
+  width:2.5em;margin-right:1.2em;text-align:right;color:var(--dim);
+}
+#listing div.cur{background:var(--cur);box-shadow:inset 3px 0 0 var(--accent)}
+#right{flex:1;position:relative;background:#0b0e13}
+canvas{position:absolute;inset:0}
+#tests{padding:24px;font:13px/1.8 ui-monospace,Menlo,Consolas,monospace;white-space:pre}
+#tests .ok{color:var(--ink)}
+#tests .no{color:var(--err)}
+</style>
+</head>
+<body>
+<header>
+  <h1>mini<span>·</span>logo</h1>
+  <button id="reset">Reset</button>
+  <button id="step">Step</button>
+  <button id="run">Run</button>
+  <select id="speed">
+    <option value="slow">slow</option>
+    <option value="medium" selected>medium</option>
+    <option value="fast">fast</option>
+  </select>
+  <span id="status">ready</span>
+</header>
+<main>
+  <section id="left">
+    <textarea id="src" spellcheck="false"></textarea>
+    <div id="listing" hidden></div>
+  </section>
+  <section id="right">
+    <canvas id="paper"></canvas>
+    <canvas id="sprite"></canvas>
+  </section>
+</main>
+<script>
+// ---------- language ----------------------------------------------------
+
+const CMDS = {
+  fd:'fd', forward:'fd',
+  bk:'bk', back:'bk', backward:'bk',
+  rt:'rt', right:'rt',
+  lt:'lt', left:'lt',
+  pu:'pu', penup:'pu',
+  pd:'pd', pendown:'pd',
+};
+const ARITY = { fd:1, bk:1, rt:1, lt:1, pu:0, pd:0 };
+
+// One entry per source line, always: blank, comment and bad lines become
+// no-ops so that program index === source line number. The highlight rides
+// on that equality.
+function parse(source) {
+  const program = [], errors = [];
+  source.split('\n').forEach((raw, i) => {
+    const fail = msg => { errors.push({ line:i, msg }); program.push({ op:null }); };
+    const text = raw.split(';')[0].trim().toLowerCase();
+    if (!text) return program.push({ op:null });
+
+    const words = text.split(/\s+/);
+    const op = CMDS[words[0]];
+    if (!op) return fail(`unknown command "${words[0]}"`);
+    if (words.length > 2) return fail(`too many words after "${words[0]}"`);
+
+    if (ARITY[op] === 0) {
+      if (words.length === 2) return fail(`"${words[0]}" takes no number`);
+      return program.push({ op, line:i });
+    }
+    const n = Number(words[1]);
+    if (words.length === 1) return fail(`"${words[0]}" needs a number`);
+    if (!Number.isFinite(n)) return fail(`"${words[1]}" is not a number`);
+    program.push({ op, arg:n, line:i });
+  });
+  return { program, errors };
+}
+
+const RAD = Math.PI / 180;
+
+// Pure. Returns the next state and the segment drawn, if any. Never touches
+// the canvas -- that is what makes it testable without a DOM.
+function step(state, instr) {
+  const s = { ...state };
+  let segment = null;
+  switch (instr.op) {
+    case 'rt': s.heading += instr.arg; break;
+    case 'lt': s.heading -= instr.arg; break;
+    case 'pu': s.pen = false; break;
+    case 'pd': s.pen = true; break;
+    case 'fd': case 'bk': {
+      const n = instr.op === 'bk' ? -instr.arg : instr.arg;
+      s.x = state.x + Math.sin(state.heading * RAD) * n;
+      s.y = state.y - Math.cos(state.heading * RAD) * n;
+      if (state.pen) segment = { x1:state.x, y1:state.y, x2:s.x, y2:s.y };
+      break;
+    }
+  }
+  return { state:s, segment };
+}
+
+// ---------- tests -------------------------------------------------------
+
+function runTests() {
+  const out = [];
+  const t = (name, fn) => {
+    try { fn(); out.push({ name, ok:true }); }
+    catch (e) { out.push({ name, ok:false, why:e.message }); }
+  };
+  const eq = (a, b, what) => {
+    if (Math.abs(a - b) > 1e-9) throw new Error(`${what}: ${a} != ${b}`);
+  };
+  const home = () => ({ x:0, y:0, heading:0, pen:true });
+  const exec = src => parse(src).program.reduce(
+    (acc, i) => {
+      const r = step(acc.state, i);
+      return { state:r.state, segs: r.segment ? acc.segs.concat(r.segment) : acc.segs };
+    },
+    { state:home(), segs:[] });
+
+  t('unknown command is rejected', () => {
+    const { errors } = parse('fwd 10');
+    if (errors.length !== 1) throw new Error('expected 1 error');
+    if (!errors[0].msg.includes('fwd')) throw new Error(errors[0].msg);
+  });
+
+  t('fd with no number is rejected', () => {
+    if (parse('fd').errors.length !== 1) throw new Error('expected 1 error');
+  });
+
+  t('pu with a number is rejected', () => {
+    if (parse('pu 5').errors.length !== 1) throw new Error('expected 1 error');
+  });
+
+  t('fd 100 / rt 90 / fd 100 lands south-east', () => {
+    const { state } = exec('fd 100\nrt 90\nfd 100');
+    eq(state.x, 100, 'x'); eq(state.y, -100, 'y'); eq(state.heading, 90, 'heading');
+  });
+
+  t('bk 50 equals fd -50', () => {
+    const a = exec('rt 30\nbk 50').state, b = exec('rt 30\nfd -50').state;
+    eq(a.x, b.x, 'x'); eq(a.y, b.y, 'y');
+  });
+
+  t('pen up draws nothing', () => {
+    const { segs } = exec('pu\nfd 100\npd\nfd 100');
+    if (segs.length !== 1) throw new Error(`expected 1 segment, got ${segs.length}`);
+  });
+
+  t('blank and comment lines keep their index', () => {
+    const { program } = parse('fd 10\n\n; nope\nrt 90');
+    if (program.length !== 4) throw new Error(`expected 4 entries, got ${program.length}`);
+    if (program[3].op !== 'rt') throw new Error('line 4 is not rt');
+  });
+
+  t('a square returns home', () => {
+    const { state } = exec('fd 100\nrt 90\nfd 100\nrt 90\nfd 100\nrt 90\nfd 100\nrt 90');
+    eq(state.x, 0, 'x'); eq(state.y, 0, 'y'); eq(state.heading, 360, 'heading');
+  });
+
+  return out;
+}
+
+// ---------- app ---------------------------------------------------------
+
+const SAMPLE = `; draw a square
+fd 100
+rt 90
+fd 100
+rt 90
+fd 100
+rt 90
+fd 100
+rt 90
+
+; hop away without drawing
+pu
+rt 45
+fd 60
+pd
+fd 40`;
+
+const DELAYS = { slow:600, medium:200, fast:0 };
+
+function main() {
+  const $ = id => document.getElementById(id);
+  const paper = $('paper'), sprite = $('sprite');
+  const ink = paper.getContext('2d'), nib = sprite.getContext('2d');
+
+  let program = [], pc = 0, state = null, timer = null, running = false, editing = true;
+
+  // ponytail: sized once on load; resizing the window does not re-fit the
+  // canvas. Add a resize handler that replays stored segments if it matters.
+  for (const c of [paper, sprite]) {
+    c.width = c.parentElement.clientWidth;
+    c.height = c.parentElement.clientHeight;
+  }
+  const home = () => ({ x:paper.width / 2, y:paper.height / 2, heading:0, pen:true });
+
+  const setStatus = (text, bad) => {
+    $('status').textContent = text;
+    $('status').classList.toggle('err', !!bad);
+  };
+
+  function drawSegment(s) {
+    ink.strokeStyle = '#7ee787';
+    ink.lineWidth = 2;
+    ink.lineCap = 'round';
+    ink.beginPath();
+    ink.moveTo(s.x1, s.y1);
+    ink.lineTo(s.x2, s.y2);
+    ink.stroke();
+  }
+
+  function drawTurtle() {
+    nib.clearRect(0, 0, sprite.width, sprite.height);
+    nib.save();
+    nib.translate(state.x, state.y);
+    nib.rotate(state.heading * RAD);
+    nib.beginPath();
+    nib.moveTo(0, -13);
+    nib.lineTo(8, 9);
+    nib.lineTo(0, 4);
+    nib.lineTo(-8, 9);
+    nib.closePath();
+    nib.fillStyle = state.pen ? '#4ea1ff' : 'transparent';
+    nib.strokeStyle = '#4ea1ff';
+    nib.lineWidth = 1.5;
+    nib.fill();
+    nib.stroke();
+    nib.restore();
+  }
+
+  function highlight(i) {
+    const rows = $('listing').children;
+    for (const row of rows) row.classList.remove('cur');
+    if (i >= 0 && rows[i]) {
+      rows[i].classList.add('cur');
+      rows[i].scrollIntoView({ block:'nearest' });
+    }
+  }
+
+  // Compile and switch to run mode. On a parse error stay in edit mode so the
+  // typo can be fixed in place, and put the caret on the offending line.
+  function enterRun() {
+    const source = $('src').value;
+    const { program:prog, errors } = parse(source);
+    if (errors.length) {
+      const { line, msg } = errors[0];
+      setStatus(`line ${line + 1}: ${msg}`, true);
+      const at = source.split('\n').slice(0, line).join('\n').length + (line ? 1 : 0);
+      $('src').focus();
+      $('src').setSelectionRange(at, at + source.split('\n')[line].length);
+      return false;
+    }
+    program = prog;
+    $('listing').replaceChildren(...source.split('\n').map(text => {
+      const row = document.createElement('div');
+      row.textContent = text || ' ';
+      return row;
+    }));
+    $('src').hidden = true;
+    $('listing').hidden = false;
+    $('src').disabled = true;
+    editing = false;
+    return true;
+  }
+
+  // Executes the next real instruction, skipping no-ops. Highlights the line
+  // it just ran, per "the last executed line is highlighted".
+  function doStep() {
+    while (pc < program.length && program[pc].op == null) pc++;
+    if (pc >= program.length) { setStatus('done'); return false; }
+
+    const instr = program[pc];
+    const { state:next, segment } = step(state, instr);
+    state = next;
+    if (segment) drawSegment(segment);
+    drawTurtle();
+    highlight(pc);
+    setStatus(`line ${pc + 1}/${program.length}`);
+    pc++;
+    return true;
+  }
+
+  function stop() {
+    running = false;
+    clearTimeout(timer);
+    $('run').textContent = 'Run';
+  }
+
+  function tick() {
+    if (!running) return;
+    if (DELAYS[$('speed').value] === 0) {           // fast: no timer at all
+      while (running && doStep());
+      return stop();
+    }
+    if (!doStep()) return stop();
+    timer = setTimeout(tick, DELAYS[$('speed').value]);
+  }
+
+  function reset() {
+    stop();
+    ink.clearRect(0, 0, paper.width, paper.height);
+    program = []; pc = 0; state = home(); editing = true;
+    $('listing').hidden = true;
+    $('src').hidden = false;
+    $('src').disabled = false;
+    drawTurtle();
+    setStatus('ready');
+  }
+
+  $('reset').onclick = reset;
+
+  $('step').onclick = () => {
+    stop();
+    if (editing && !enterRun()) return;
+    doStep();
+  };
+
+  $('run').onclick = () => {
+    if (running) return stop();
+    if (editing && !enterRun()) return;
+    if (pc >= program.length) return setStatus('done — press Reset');
+    running = true;
+    $('run').textContent = 'Stop';
+    tick();
+  };
+
+  $('src').value = SAMPLE;
+  reset();
+}
+
+function showTests() {
+  const results = runTests();
+  const failed = results.filter(r => !r.ok).length;
+  document.body.replaceChildren(Object.assign(document.createElement('pre'), {
+    id: 'tests',
+    innerHTML: results
+      .map(r => r.ok
+        ? `<span class="ok">pass</span>  ${r.name}`
+        : `<span class="no">FAIL</span>  ${r.name}\n        ${r.why}`)
+      .join('\n')
+      + `\n\n${results.length - failed}/${results.length} passed`,
+  }));
+}
+
+if (typeof document !== 'undefined') {
+  (location.search.includes('test') ? showTests : main)();
+}
+</script>
+</body>
+</html>
