@@ -7,7 +7,7 @@
 <style>
 :root{
   --bg:#0e1116; --panel:#161b22; --line:#232a33; --fg:#e6edf3; --dim:#8b949e;
-  --accent:#4ea1ff; --cur:#1f3a57; --err:#f85149; --ink:#7ee787;
+  --accent:#4ea1ff; --cur:#1f3a57; --err:#f85149; --ink:#7ee787; --mark:#2f5d8a;
 }
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
@@ -30,13 +30,26 @@ h1 span{color:var(--accent)}
 #status{margin-left:auto;color:var(--dim);font-variant-numeric:tabular-nums}
 #status.err{color:var(--err)}
 main{flex:1;display:flex;min-height:0}
-#left{width:min(44%,540px);display:flex;border-right:1px solid var(--line)}
-#src,#listing{
-  flex:1;margin:0;padding:14px 14px 40vh;background:var(--panel);color:var(--fg);
-  font:13px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  border:0;outline:none;resize:none;overflow:auto;white-space:pre;
+#left{
+  width:min(44%,540px);display:flex;background:var(--panel);
+  border-right:1px solid var(--line);
 }
-#listing{counter-reset:ln}
+#editor{flex:1;position:relative;overflow:hidden}
+/* #src and #mirror must agree on every metric or the overlay drifts. */
+#src,#mirror,#listing{
+  margin:0;padding:14px 14px 40vh;background:transparent;
+  font:13px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  border:0;outline:none;resize:none;white-space:pre;
+}
+#src,#mirror{position:absolute;inset:0}
+#mirror{color:var(--fg);overflow:hidden;pointer-events:none}
+#src{color:transparent;caret-color:var(--fg);overflow:auto;scrollbar-width:none}
+#src::-webkit-scrollbar{display:none}
+/* Opaque selection would hide the mirror text underneath it. */
+#src::selection{background:rgba(78,161,255,.35)}
+#mirror mark{background:var(--mark);color:var(--fg);border-radius:3px}
+#mirror mark.bad{background:var(--err);color:var(--bg)}
+#listing{flex:1;overflow:auto;counter-reset:ln}
 #listing div{padding:0 6px;border-radius:4px;min-height:1.7em}
 #listing div::before{
   counter-increment:ln;content:counter(ln);display:inline-block;
@@ -62,11 +75,15 @@ canvas{position:absolute;inset:0}
     <option value="medium" selected>medium</option>
     <option value="fast">fast</option>
   </select>
+  <button id="tidy">Tidy</button>
   <span id="status">ready</span>
 </header>
 <main>
   <section id="left">
-    <textarea id="src" spellcheck="false"></textarea>
+    <div id="editor">
+      <div id="mirror" aria-hidden="true"></div>
+      <textarea id="src" spellcheck="false" wrap="off"></textarea>
+    </div>
     <div id="listing" hidden></div>
   </section>
   <section id="right">
@@ -186,6 +203,47 @@ function* walk(nodes, trail = []) {
   }
 }
 
+// Brackets inside a comment must not match. Blank the comments out, keeping
+// length so indices still line up with the real text.
+function maskComments(text) {
+  return text.split('\n').map(line => {
+    const i = line.indexOf(';');
+    return i < 0 ? line : line.slice(0, i) + ' '.repeat(line.length - i);
+  }).join('\n');
+}
+
+// The bracket pair touching `caret`: [open, close], [lone] when unmatched,
+// null when the caret is not on a bracket at all.
+function matchPair(text, caret) {
+  const isBracket = i => text[i] === '[' || text[i] === ']';
+  const i = isBracket(caret) ? caret : isBracket(caret - 1) ? caret - 1 : -1;
+  if (i < 0) return null;
+  const dir = text[i] === '[' ? 1 : -1;
+  let depth = 0;
+  for (let j = i; j >= 0 && j < text.length; j += dir) {
+    if (text[j] === '[') depth++;
+    else if (text[j] === ']') depth--;
+    if (depth === 0) return i < j ? [i, j] : [j, i];
+  }
+  return [i];
+}
+
+// Re-indent by bracket depth. Line-based rather than token-based, because
+// the tokenizer drops comments and Tidy has to keep them.
+function tidy(source) {
+  let depth = 0;
+  return source.split('\n').map(raw => {
+    const line = raw.trim();
+    if (!line) return '';
+    const code = line.split(';')[0];
+    const opens = (code.match(/\[/g) || []).length;
+    const closes = (code.match(/\]/g) || []).length;
+    const lead = code.startsWith(']') ? depth - 1 : depth;
+    depth = Math.max(0, depth + opens - closes);
+    return '  '.repeat(Math.max(0, lead)) + line;
+  }).join('\n');
+}
+
 const RAD = Math.PI / 180;
 
 // Pure. Returns the next state and the segment drawn, if any. Never touches
@@ -219,6 +277,7 @@ function buttonState({ editing, running, remaining, depth }) {
     stepout: !editing && !running && depth > 0,  // nothing to step out of
     run:     !finished,                          // stays live while running: it is Stop
     reset:   !editing,                           // nothing to undo yet
+    tidy:    editing,                            // the listing is read-only
   };
 }
 
@@ -358,14 +417,52 @@ function runTests() {
     if (errs('repeat -1 [fd 10]').length !== 1) throw new Error('expected 1 error');
   });
 
+  t('matching bracket found across lines', () => {
+    const src = 'repeat 4 [\n  fd 100\n]';
+    const got = matchPair(src, src.indexOf('['));
+    if (String(got) !== String([9, src.indexOf(']')])) throw new Error(String(got));
+  });
+
+  t('nesting picks the right partner', () => {
+    const src = '[ [ ] ]';
+    if (String(matchPair(src, 0)) !== '0,6') throw new Error(String(matchPair(src, 0)));
+    if (String(matchPair(src, 2)) !== '2,4') throw new Error(String(matchPair(src, 2)));
+  });
+
+  t('a bracket inside a comment is ignored', () => {
+    const src = 'repeat 2 [ ; [\n]';
+    const got = matchPair(maskComments(src), 9);
+    if (String(got) !== '9,15') throw new Error(String(got));
+    if (matchPair(src, 9).length !== 1) throw new Error('unmasked should not match');
+  });
+
+  t('an unmatched bracket is flagged alone', () => {
+    const got = matchPair('repeat 2 [fd 1', 9);
+    if (got.length !== 1) throw new Error(String(got));
+    if (matchPair('fd 100', 2) !== null) throw new Error('caret off a bracket should be null');
+  });
+
+  t('tidy indents and is idempotent', () => {
+    const messy = 'repeat 4 [\nfd 100\n    rt 90\n]\n; done';
+    const want  = 'repeat 4 [\n  fd 100\n  rt 90\n]\n; done';
+    if (tidy(messy) !== want) throw new Error(JSON.stringify(tidy(messy)));
+    if (tidy(want) !== want) throw new Error('not idempotent');
+  });
+
+  t('tidy nests and keeps comments', () => {
+    const got = tidy('repeat 2 [\n; inner\nrepeat 3 [\nfd 1\n]\n]');
+    const want = 'repeat 2 [\n  ; inner\n  repeat 3 [\n    fd 1\n  ]\n]';
+    if (got !== want) throw new Error(JSON.stringify(got));
+  });
+
   t('controls disable where they make no sense', () => {
     const show = s => Object.values(buttonState(s)).map(v => v ? 1 : 0).join('');
-    const cases = [                                                 // step out run reset
-      ['editing',     { editing:true,  running:false, remaining:false, depth:0 }, '1010'],
-      ['paused',      { editing:false, running:false, remaining:true,  depth:0 }, '1011'],
-      ['paused+loop', { editing:false, running:false, remaining:true,  depth:1 }, '1111'],
-      ['playing',     { editing:false, running:true,  remaining:true,  depth:1 }, '0011'],
-      ['finished',    { editing:false, running:false, remaining:false, depth:0 }, '0001'],
+    const cases = [                                            // step out run reset tidy
+      ['editing',     { editing:true,  running:false, remaining:false, depth:0 }, '10101'],
+      ['paused',      { editing:false, running:false, remaining:true,  depth:0 }, '10110'],
+      ['paused+loop', { editing:false, running:false, remaining:true,  depth:1 }, '11110'],
+      ['playing',     { editing:false, running:true,  remaining:true,  depth:1 }, '00110'],
+      ['finished',    { editing:false, running:false, remaining:false, depth:0 }, '00010'],
     ];
     for (const [name, state, want] of cases) {
       const got = show(state);
@@ -431,7 +528,29 @@ function main() {
       remaining: pending !== null,
       depth: pending ? pending.trail.length : 0,
     });
-    for (const id of ['step', 'stepout', 'run', 'reset']) $(id).disabled = !on[id];
+    for (const id of ['step', 'stepout', 'run', 'reset', 'tidy']) $(id).disabled = !on[id];
+  }
+
+  const esc = s => s.replace(/[&<]/g, c => c === '&' ? '&amp;' : '&lt;');
+
+  // The mirror renders what the textarea holds; the textarea's own text is
+  // transparent. Only the mirror can carry a <mark>.
+  function paintMirror() {
+    const text = $('src').value;
+    const pair = matchPair(maskComments(text), $('src').selectionStart);
+    const mark = (c, bad) => `<mark${bad ? ' class="bad"' : ''}>${esc(c)}</mark>`;
+    let html;
+    if (!pair) {
+      html = esc(text);
+    } else if (pair.length === 1) {
+      const [a] = pair;
+      html = esc(text.slice(0, a)) + mark(text[a], true) + esc(text.slice(a + 1));
+    } else {
+      const [a, b] = pair;
+      html = esc(text.slice(0, a)) + mark(text[a]) + esc(text.slice(a + 1, b))
+           + mark(text[b]) + esc(text.slice(b + 1));
+    }
+    $('mirror').innerHTML = html;
   }
 
   function drawSegment(s) {
@@ -500,9 +619,8 @@ function main() {
       row.textContent = text || ' ';
       return row;
     }));
-    $('src').hidden = true;
+    $('editor').hidden = true;
     $('listing').hidden = false;
-    $('src').disabled = true;
     iter = walk(body);
     pending = iter.next().value ?? null;
     editing = false;
@@ -558,14 +676,34 @@ function main() {
     iter = null; pending = null; last = null;
     state = home(); editing = true;
     $('listing').hidden = true;
-    $('src').hidden = false;
-    $('src').disabled = false;
+    $('editor').hidden = false;
+    paintMirror();
     drawTurtle();
     setStatus('ready');
     syncButtons();
   }
 
   $('reset').onclick = reset;
+
+  // ponytail: execCommand is deprecated but is the only way to replace a
+  // textarea's contents without destroying its native undo stack.
+  $('tidy').onclick = () => {
+    const src = $('src'), out = tidy(src.value);
+    if (out === src.value) return;
+    src.focus();
+    src.select();
+    if (!document.execCommand('insertText', false, out)) src.value = out;
+    paintMirror();
+  };
+
+  $('src').addEventListener('input', paintMirror);
+  $('src').addEventListener('scroll', () => {
+    $('mirror').scrollTop = $('src').scrollTop;
+    $('mirror').scrollLeft = $('src').scrollLeft;
+  });
+  document.addEventListener('selectionchange', () => {
+    if (document.activeElement === $('src')) paintMirror();
+  });
 
   $('step').onclick = () => {
     stop();

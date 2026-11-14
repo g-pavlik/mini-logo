@@ -147,6 +147,49 @@ Programs are tiny and execution is deterministic, so if Step Back is ever
 wanted it is "replay from zero, stop one instruction earlier" rather than
 anything structural.
 
+## Editing
+
+Added after the loops work landed, because multi-line blocks are what make
+an unmatched bracket easy to write.
+
+A `<textarea>` cannot style a range of its own text, so bracket matching
+uses an overlay: a `#mirror` div renders the same text *behind* a textarea
+whose text is transparent and whose caret is not.
+
+- `#src` and `#mirror` share **one** CSS rule for font, padding and
+  `white-space: pre`. If they ever disagree on a metric the overlay drifts,
+  so they must not be styled apart.
+- `wrap="off"` removes line wrapping, the overlay's usual failure mode.
+  LOGO lines are short, so nothing is lost.
+- The textarea's scrollbars are hidden and `#mirror` is scrolled
+  programmatically to follow it.
+- `#src::selection` is translucent. An opaque selection would hide the
+  mirror text underneath it.
+
+`matchPair(text, caret)` returns the pair touching the caret as
+`[open, close]`, a single index when the bracket has no partner, or `null`
+when the caret is not on a bracket. It runs against `maskComments(text)`,
+which blanks comments while preserving length so indices still line up —
+otherwise a `[` inside a `;` comment matches and the real pair does not.
+
+An unmatched bracket is marked in the error colour rather than left plain:
+it is the case most worth seeing, and it costs two lines.
+
+### Tidy
+
+A **Tidy** button re-indents the whole program — two spaces per bracket
+depth, a line beginning with `]` dedenting itself, blank lines left blank.
+
+It is line-based rather than token-based, because the tokenizer discards
+comments and Tidy must keep them. It does not validate: unbalanced brackets
+clamp the depth at zero instead of erroring, since Run already reports them
+properly.
+
+Tidy replaces the text through `document.execCommand('insertText')`. That
+API is deprecated, but assigning to `textarea.value` destroys the native
+undo stack, and being able to undo a Tidy matters more than avoiding a
+deprecated call.
+
 ## Step Out
 
 Finishes the enclosing loop — all its remaining iterations — and stops at
@@ -210,11 +253,13 @@ A fourth button, **Step Out**, between Step and Run.
 | **Step Out** | off     | on if depth>0  | off            | off      |
 | **Run**      | on      | on             | on, as *Stop*  | off      |
 | **Reset**    | off     | on             | on             | on       |
+| **Tidy**     | on      | off            | off            | off      |
 
 - `step: !running && !finished`
 - `stepOut: !editing && !running && depth > 0`
 - `run: !finished`
 - `reset: !editing`
+- `tidy: editing`
 
 `depth` is 0 while Editing and when Finished, so those columns need no
 special case. Step Out stays off in Editing deliberately: you must take at
@@ -293,5 +338,12 @@ tokenizer, parser and `walk`:
 - A stray `]`, and `repeat` without a count, are each one error.
 - `repeat 0 [fd 10]` parses and yields no instructions.
 - `repeat 2.5 [fd 10]` is an error.
-- `buttonState` returns the four-row table above, including a Paused row
-  at depth 0 and one at depth 1.
+- `buttonState` returns the table above, including a Paused row at depth 0
+  and one at depth 1.
+- `matchPair` finds a partner across lines and picks the right one when
+  nested.
+- A bracket inside a comment is ignored, and the same text unmasked fails
+  to match — so the test would catch the mask being dropped.
+- An unmatched bracket returns one index; a caret off any bracket returns
+  `null`.
+- `tidy` re-indents a mangled program, is idempotent, and keeps comments.

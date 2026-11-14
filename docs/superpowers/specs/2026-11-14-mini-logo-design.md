@@ -1,4 +1,4 @@
-# mini-logo — design spec (V1)
+- # mini-logo — design spec (V1)
 
 Date: 2026-11-14
 Status: approved
