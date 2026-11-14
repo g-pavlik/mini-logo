@@ -240,6 +240,21 @@ the point of keeping a line number on every token.
 Error handling is otherwise unchanged from V1: the first error goes to the
 status bar, the editor stays open, and the offending line is selected.
 
+### Recovery
+
+One mistake produces one message. A token that fails takes its likely
+argument or block with it, rather than leaving it to be reported a second
+time on its own:
+
+- an unknown command swallows a following number,
+- a `repeat` that fails for any reason still consumes its `[ ... ]`,
+- a stray `[` consumes the block it opens.
+
+Found while implementing. Without it `fwd 10` reports both
+`unknown command "fwd"` and `unknown command "10"`, and `repeat 2.5 [fd 10]`
+reports the bad count and then the unexpected bracket. The tests assert
+exactly one error for each of these.
+
 ## Sample program
 
 The default program becomes the loop form, since it is now the point:
@@ -265,7 +280,8 @@ V1's assertions stay (minus "too many words"). Added, all against the pure
 tokenizer, parser and `walk`:
 
 - `[fd` tokenizes as `[` then `fd`.
-- `repeat 4 [fd 100 rt 90]` and its multi-line form produce the same AST.
+- `repeat 4 [fd 100 rt 90]` and its multi-line form produce the same AST
+  once line numbers are stripped — they necessarily differ on those.
 - A `repeat` square ends in the same state as V1's unrolled square.
 - `repeat 2 [repeat 2 [fd 10]]` yields four instructions.
 - The third instruction of `repeat 4 [fd 1 rt 1]` carries

@@ -55,6 +55,7 @@ canvas{position:absolute;inset:0}
   <h1>mini<span>·</span>logo</h1>
   <button id="reset">Reset</button>
   <button id="step">Step</button>
+  <button id="stepout">Step Out</button>
   <button id="run">Run</button>
   <select id="speed">
     <option value="slow">slow</option>
@@ -86,31 +87,103 @@ const CMDS = {
 };
 const ARITY = { fd:1, bk:1, rt:1, lt:1, pu:0, pd:0 };
 
-// One entry per source line, always: blank, comment and bad lines become
-// no-ops so that program index === source line number. The highlight rides
-// on that equality.
-function parse(source) {
-  const program = [], errors = [];
-  source.split('\n').forEach((raw, i) => {
-    const fail = msg => { errors.push({ line:i, msg }); program.push({ op:null }); };
-    const text = raw.split(';')[0].trim().toLowerCase();
-    if (!text) return program.push({ op:null });
-
-    const words = text.split(/\s+/);
-    const op = CMDS[words[0]];
-    if (!op) return fail(`unknown command "${words[0]}"`);
-    if (words.length > 2) return fail(`too many words after "${words[0]}"`);
-
-    if (ARITY[op] === 0) {
-      if (words.length === 2) return fail(`"${words[0]}" takes no number`);
-      return program.push({ op, line:i });
-    }
-    const n = Number(words[1]);
-    if (words.length === 1) return fail(`"${words[0]}" needs a number`);
-    if (!Number.isFinite(n)) return fail(`"${words[1]}" is not a number`);
-    program.push({ op, arg:n, line:i });
+// Brackets separate from adjacent words, so `[fd` is two tokens. Every token
+// carries its source line, which is all the highlight ever needs.
+function tokenize(source) {
+  const tokens = [];
+  source.split('\n').forEach((raw, line) => {
+    const text = raw.split(';')[0].replace(/[[\]]/g, ' $& ').trim();
+    for (const t of text.split(/\s+/)) if (t) tokens.push({ text:t.toLowerCase(), line });
   });
-  return { program, errors };
+  return tokens;
+}
+
+// Recursive descent. A node is either a primitive {op, arg?, line} or
+// {op:'repeat', count, body, line}. Blocks and the top level are the same
+// routine; they differ only in whether `]` closes or is an error.
+function parseProgram(tokens) {
+  const errors = [];
+  let i = 0;
+  const fail = (tok, msg) => errors.push({ line:tok.line, msg });
+
+  function number(at, missing) {
+    const tok = tokens[i];
+    if (!tok || tok.text === '[' || tok.text === ']') { fail(at, missing); return null; }
+    i++;
+    const n = Number(tok.text);
+    if (!Number.isFinite(n)) { fail(tok, `"${tok.text}" is not a number`); return null; }
+    return n;
+  }
+
+  function repeatNode(tok) {
+    const count = number(tok, 'repeat needs a number');
+    let bad = count === null;
+    if (!bad && (!Number.isInteger(count) || count < 0)) {
+      fail(tok, 'repeat needs a whole number of times');
+      bad = true;
+    }
+    const open = tokens[i];
+    if (!open || open.text !== '[') {
+      if (!bad) fail(tok, 'repeat needs [ after the count');
+      return null;
+    }
+    i++;
+    const body = block(open);   // consumed even when bad, to resync
+    return bad ? null : { op:'repeat', count, body, line:tok.line };
+  }
+
+  function block(opener) {
+    const body = [];
+    while (i < tokens.length) {
+      const tok = tokens[i++];
+      if (tok.text === ']') {
+        if (opener) return body;
+        fail(tok, 'unexpected ]');
+        continue;
+      }
+      if (tok.text === '[') { fail(tok, 'unexpected ['); block(tok); continue; }
+      if (tok.text === 'repeat') {
+        const node = repeatNode(tok);
+        if (node) body.push(node);
+        continue;
+      }
+      const op = CMDS[tok.text];
+      if (!op) {
+        fail(tok, `unknown command "${tok.text}"`);
+        const next = tokens[i];
+        if (next && Number.isFinite(Number(next.text))) i++;   // its argument
+        continue;
+      }
+      if (ARITY[op] === 0) {
+        const next = tokens[i];
+        if (next && Number.isFinite(Number(next.text))) {
+          fail(tok, `"${tok.text}" takes no number`);
+          i++;
+          continue;
+        }
+        body.push({ op, line:tok.line });
+        continue;
+      }
+      const arg = number(tok, `"${tok.text}" needs a number`);
+      if (arg !== null) body.push({ op, arg, line:tok.line });
+    }
+    if (opener) fail(opener, 'unclosed [');
+    return body;
+  }
+
+  return { body:block(null), errors };
+}
+
+// The whole execution model. `yield*` handles nesting; `trail` carries one
+// {i, of} per enclosing loop, so trail.length is the depth and the entries
+// are the iteration counters.
+function* walk(nodes, trail = []) {
+  for (const n of nodes) {
+    if (n.op === 'repeat')
+      for (let i = 1; i <= n.count; i++) yield* walk(n.body, [...trail, { i, of:n.count }]);
+    else
+      yield { instr:n, trail };
+  }
 }
 
 const RAD = Math.PI / 180;
@@ -138,13 +211,14 @@ function step(state, instr) {
 
 // Which controls make sense right now. Pure, so the truth table is testable.
 // editing: nothing executed yet. running: the continuous timer is driving.
-// remaining: at least one instruction left to execute.
-function buttonState({ editing, running, remaining }) {
+// remaining: an instruction is pending. depth: how many loops enclose it.
+function buttonState({ editing, running, remaining, depth }) {
   const finished = !editing && !remaining;
   return {
-    step:  !running && !finished,   // fighting the timer, or nothing left
-    run:   !finished,               // stays live while running: it is Stop
-    reset: !editing,                // nothing to undo yet
+    step:    !running && !finished,              // fighting the timer, or nothing left
+    stepout: !editing && !running && depth > 0,  // nothing to step out of
+    run:     !finished,                          // stays live while running: it is Stop
+    reset:   !editing,                           // nothing to undo yet
   };
 }
 
@@ -160,25 +234,29 @@ function runTests() {
     if (Math.abs(a - b) > 1e-9) throw new Error(`${what}: ${a} != ${b}`);
   };
   const home = () => ({ x:0, y:0, heading:0, pen:true });
-  const exec = src => parse(src).program.reduce(
-    (acc, i) => {
-      const r = step(acc.state, i);
-      return { state:r.state, segs: r.segment ? acc.segs.concat(r.segment) : acc.segs };
-    },
-    { state:home(), segs:[] });
+  const compile = src => parseProgram(tokenize(src));
+  const trace = src => [...walk(compile(src).body)];
+  const exec = src => trace(src).reduce((acc, { instr }) => {
+    const r = step(acc.state, instr);
+    return { state:r.state, segs: r.segment ? acc.segs.concat(r.segment) : acc.segs };
+  }, { state:home(), segs:[] });
+  const errs = src => compile(src).errors;
+  const bare = n => JSON.stringify(n, (k, v) => k === 'line' ? undefined : v);
 
   t('unknown command is rejected', () => {
-    const { errors } = parse('fwd 10');
-    if (errors.length !== 1) throw new Error('expected 1 error');
-    if (!errors[0].msg.includes('fwd')) throw new Error(errors[0].msg);
+    const e = errs('fwd 10');
+    if (e.length !== 1) throw new Error('expected 1 error');
+    if (!e[0].msg.includes('fwd')) throw new Error(e[0].msg);
   });
 
   t('fd with no number is rejected', () => {
-    if (parse('fd').errors.length !== 1) throw new Error('expected 1 error');
+    if (errs('fd').length !== 1) throw new Error('expected 1 error');
   });
 
   t('pu with a number is rejected', () => {
-    if (parse('pu 5').errors.length !== 1) throw new Error('expected 1 error');
+    const e = errs('pu 5');
+    if (e.length !== 1) throw new Error(`expected 1 error, got ${e.length}`);
+    if (!e[0].msg.includes('takes no number')) throw new Error(e[0].msg);
   });
 
   t('fd 100 / rt 90 / fd 100 lands south-east', () => {
@@ -196,10 +274,16 @@ function runTests() {
     if (segs.length !== 1) throw new Error(`expected 1 segment, got ${segs.length}`);
   });
 
-  t('blank and comment lines keep their index', () => {
-    const { program } = parse('fd 10\n\n; nope\nrt 90');
-    if (program.length !== 4) throw new Error(`expected 4 entries, got ${program.length}`);
-    if (program[3].op !== 'rt') throw new Error('line 4 is not rt');
+  t('blanks and comments yield no instructions', () => {
+    const tr = trace('fd 10\n\n; nope\nrt 90');
+    if (tr.length !== 2) throw new Error(`expected 2 instructions, got ${tr.length}`);
+    if (tr[1].instr.line !== 3) throw new Error(`rt 90 reports line ${tr[1].instr.line}`);
+  });
+
+  t('several instructions on one line are legal', () => {
+    const tr = trace('fd 100 rt 90');
+    if (tr.length !== 2) throw new Error(`expected 2 instructions, got ${tr.length}`);
+    if (errs('fd 100 rt 90').length) throw new Error('unexpected error');
   });
 
   t('a square returns home', () => {
@@ -207,13 +291,81 @@ function runTests() {
     eq(state.x, 0, 'x'); eq(state.y, 0, 'y'); eq(state.heading, 360, 'heading');
   });
 
+  t('[fd tokenizes as two tokens', () => {
+    const got = tokenize('repeat 2 [fd 10]').map(x => x.text).join(' ');
+    if (got !== 'repeat 2 [ fd 10 ]') throw new Error(got);
+  });
+
+  t('one-line and multi-line repeat agree', () => {
+    const one = compile('repeat 4 [fd 100 rt 90]').body;
+    const many = compile('repeat 4 [\n  fd 100\n  rt 90\n]').body;
+    if (bare(one) !== bare(many)) throw new Error(bare(one) + ' vs ' + bare(many));
+  });
+
+  t('repeat draws the same square as the unrolled form', () => {
+    const a = exec('repeat 4 [fd 100 rt 90]').state;
+    const b = exec('fd 100\nrt 90\nfd 100\nrt 90\nfd 100\nrt 90\nfd 100\nrt 90').state;
+    eq(a.x, b.x, 'x'); eq(a.y, b.y, 'y'); eq(a.heading, b.heading, 'heading');
+  });
+
+  t('nested repeat yields every instruction', () => {
+    const tr = trace('repeat 2 [repeat 2 [fd 10]]');
+    if (tr.length !== 4) throw new Error(`expected 4, got ${tr.length}`);
+  });
+
+  t('trail reports the iteration', () => {
+    const { trail } = trace('repeat 4 [fd 1 rt 1]')[2];
+    if (JSON.stringify(trail) !== '[{"i":2,"of":4}]') throw new Error(JSON.stringify(trail));
+  });
+
+  t('depth rises and falls with nesting', () => {
+    const got = trace('repeat 2 [repeat 2 [fd 10] rt 90]\nfd 5')
+      .map(x => x.trail.length).join('');
+    if (got !== '2212210') throw new Error(got);
+  });
+
+  t('step out leaves the loop', () => {
+    const tr = trace('repeat 3 [fd 1 rt 1]\nfd 50');
+    const depth = tr[1].trail.length;
+    let j = 1;
+    while (j < tr.length && tr[j].trail.length >= depth) j++;
+    if (j !== 6) throw new Error(`landed at ${j}`);
+    if (tr[j].instr.arg !== 50) throw new Error('did not land on fd 50');
+  });
+
+  t('unclosed [ is reported where it opened', () => {
+    const e = errs('fd 1\nrepeat 2 [fd 10\nfd 2');
+    if (e.length !== 1) throw new Error(`expected 1 error, got ${e.length}`);
+    if (e[0].line !== 1) throw new Error(`reported line ${e[0].line}`);
+    if (!e[0].msg.includes('unclosed')) throw new Error(e[0].msg);
+  });
+
+  t('a stray ] is an error', () => {
+    if (errs('fd 10 ]').length !== 1) throw new Error('expected 1 error');
+  });
+
+  t('repeat without a count is an error', () => {
+    if (errs('repeat [fd 10]').length !== 1) throw new Error('expected 1 error');
+  });
+
+  t('repeat 0 runs nothing', () => {
+    if (errs('repeat 0 [fd 10]').length) throw new Error('unexpected error');
+    if (trace('repeat 0 [fd 10]').length !== 0) throw new Error('expected no instructions');
+  });
+
+  t('repeat 2.5 is an error', () => {
+    if (errs('repeat 2.5 [fd 10]').length !== 1) throw new Error('expected 1 error');
+    if (errs('repeat -1 [fd 10]').length !== 1) throw new Error('expected 1 error');
+  });
+
   t('controls disable where they make no sense', () => {
     const show = s => Object.values(buttonState(s)).map(v => v ? 1 : 0).join('');
-    const cases = [                                      // step run reset
-      ['editing',  { editing:true,  running:false, remaining:false }, '110'],
-      ['paused',   { editing:false, running:false, remaining:true  }, '111'],
-      ['playing',  { editing:false, running:true,  remaining:true  }, '011'],
-      ['finished', { editing:false, running:false, remaining:false }, '001'],
+    const cases = [                                                 // step out run reset
+      ['editing',     { editing:true,  running:false, remaining:false, depth:0 }, '1010'],
+      ['paused',      { editing:false, running:false, remaining:true,  depth:0 }, '1011'],
+      ['paused+loop', { editing:false, running:false, remaining:true,  depth:1 }, '1111'],
+      ['playing',     { editing:false, running:true,  remaining:true,  depth:1 }, '0011'],
+      ['finished',    { editing:false, running:false, remaining:false, depth:0 }, '0001'],
     ];
     for (const [name, state, want] of cases) {
       const got = show(state);
@@ -227,14 +379,10 @@ function runTests() {
 // ---------- app ---------------------------------------------------------
 
 const SAMPLE = `; draw a square
-fd 100
-rt 90
-fd 100
-rt 90
-fd 100
-rt 90
-fd 100
-rt 90
+repeat 4 [
+  fd 100
+  rt 90
+]
 
 ; hop away without drawing
 pu
@@ -245,12 +393,20 @@ fd 40`;
 
 const DELAYS = { slow:600, medium:200, fast:0 };
 
+// ponytail: a synchronous burst cannot be interrupted, so it is capped.
+// Raise it if someone turns up with a legitimately long program.
+const MAX_STEPS = 100000;
+
 function main() {
   const $ = id => document.getElementById(id);
   const paper = $('paper'), sprite = $('sprite');
   const ink = paper.getContext('2d'), nib = sprite.getContext('2d');
 
-  let program = [], pc = 0, state = null, timer = null, running = false, editing = true;
+  // `pending` is the next instruction, pulled but not yet executed. That one
+  // instruction of lookahead is what lets the controls know the loop depth
+  // before you press anything.
+  let iter = null, pending = null, last = null, lineCount = 0;
+  let state = null, timer = null, running = false, editing = true;
 
   // ponytail: sized once on load; resizing the window does not re-fit the
   // canvas. Add a resize handler that replays stored segments if it matters.
@@ -265,15 +421,17 @@ function main() {
     $('status').classList.toggle('err', !!bad);
   };
 
-  function remaining() {
-    let i = pc;
-    while (i < program.length && program[i].op == null) i++;
-    return i < program.length;
-  }
+  const describe = ({ line, trail }) =>
+    `line ${line + 1}/${lineCount}`
+    + (trail.length ? ' · repeat ' + trail.map(r => `${r.i}/${r.of}`).join(' › ') : '');
 
   function syncButtons() {
-    const on = buttonState({ editing, running, remaining: remaining() });
-    for (const id of ['step', 'run', 'reset']) $(id).disabled = !on[id];
+    const on = buttonState({
+      editing, running,
+      remaining: pending !== null,
+      depth: pending ? pending.trail.length : 0,
+    });
+    for (const id of ['step', 'stepout', 'run', 'reset']) $(id).disabled = !on[id];
   }
 
   function drawSegment(s) {
@@ -305,20 +463,28 @@ function main() {
     nib.restore();
   }
 
-  function highlight(i) {
+  function highlight(line) {
     const rows = $('listing').children;
     for (const row of rows) row.classList.remove('cur');
-    if (i >= 0 && rows[i]) {
-      rows[i].classList.add('cur');
-      rows[i].scrollIntoView({ block:'nearest' });
+    if (rows[line]) {
+      rows[line].classList.add('cur');
+      rows[line].scrollIntoView({ block:'nearest' });
     }
+  }
+
+  // Everything the eye needs, done once rather than per instruction, so a
+  // burst of thousands of steps does not repaint thousands of times.
+  function paint() {
+    drawTurtle();
+    if (last) highlight(last.line);
+    setStatus(pending ? describe(last) : 'done');
   }
 
   // Compile and switch to run mode. On a parse error stay in edit mode so the
   // typo can be fixed in place, and put the caret on the offending line.
   function enterRun() {
     const source = $('src').value;
-    const { program:prog, errors } = parse(source);
+    const { body, errors } = parseProgram(tokenize(source));
     if (errors.length) {
       const { line, msg } = errors[0];
       setStatus(`line ${line + 1}: ${msg}`, true);
@@ -327,8 +493,9 @@ function main() {
       $('src').setSelectionRange(at, at + source.split('\n')[line].length);
       return false;
     }
-    program = prog;
-    $('listing').replaceChildren(...source.split('\n').map(text => {
+    const lines = source.split('\n');
+    lineCount = lines.length;
+    $('listing').replaceChildren(...lines.map(text => {
       const row = document.createElement('div');
       row.textContent = text || ' ';
       return row;
@@ -336,25 +503,36 @@ function main() {
     $('src').hidden = true;
     $('listing').hidden = false;
     $('src').disabled = true;
+    iter = walk(body);
+    pending = iter.next().value ?? null;
     editing = false;
     return true;
   }
 
-  // Executes the next real instruction, skipping no-ops. Highlights the line
-  // it just ran, per "the last executed line is highlighted".
-  function doStep() {
-    while (pc < program.length && program[pc].op == null) pc++;
-    if (pc >= program.length) { setStatus('done'); return false; }
-
-    const instr = program[pc];
+  // Executes the pending instruction and pulls the next. `quiet` skips the
+  // repaint, for callers that paint once at the end.
+  function doStep(quiet) {
+    if (!pending) { if (!quiet) setStatus('done'); return false; }
+    const { instr, trail } = pending;
     const { state:next, segment } = step(state, instr);
     state = next;
     if (segment) drawSegment(segment);
-    drawTurtle();
-    highlight(pc);
-    setStatus(`line ${pc + 1}/${program.length}`);
-    pc++;
+    last = { line:instr.line, trail };
+    pending = iter.next().value ?? null;
+    if (!quiet) paint();
     return true;
+  }
+
+  // Run synchronously while `cont` holds. Used by fast mode and Step Out.
+  function burst(cont) {
+    let n = 0;
+    while (cont() && doStep(true)) {
+      if (++n >= MAX_STEPS) {
+        paint();
+        return setStatus(`stopped after ${MAX_STEPS} steps`, true);
+      }
+    }
+    paint();
   }
 
   function stop() {
@@ -367,7 +545,7 @@ function main() {
   function tick() {
     if (!running) return;
     if (DELAYS[$('speed').value] === 0) {           // fast: no timer at all
-      while (running && doStep());
+      burst(() => running);
       return stop();
     }
     if (!doStep()) return stop();
@@ -377,7 +555,8 @@ function main() {
   function reset() {
     stop();
     ink.clearRect(0, 0, paper.width, paper.height);
-    program = []; pc = 0; state = home(); editing = true;
+    iter = null; pending = null; last = null;
+    state = home(); editing = true;
     $('listing').hidden = true;
     $('src').hidden = false;
     $('src').disabled = false;
@@ -392,6 +571,13 @@ function main() {
     stop();
     if (editing && !enterRun()) return;
     doStep();
+    syncButtons();
+  };
+
+  $('stepout').onclick = () => {
+    stop();
+    const depth = pending.trail.length;
+    burst(() => pending && pending.trail.length >= depth);
     syncButtons();
   };
 
