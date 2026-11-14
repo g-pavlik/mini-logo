@@ -23,7 +23,7 @@ button,select{
   font:inherit;color:var(--fg);background:#1f2630;border:1px solid var(--line);
   border-radius:6px;padding:6px 12px;cursor:pointer;
 }
-button:hover,select:hover{border-color:var(--accent)}
+button:not(:disabled):hover,select:hover{border-color:var(--accent)}
 button:disabled{opacity:.45;cursor:default;border-color:var(--line)}
 h1{font-size:14px;font-weight:600;margin:0 10px 0 0;letter-spacing:.02em}
 h1 span{color:var(--accent)}
@@ -136,6 +136,18 @@ function step(state, instr) {
   return { state:s, segment };
 }
 
+// Which controls make sense right now. Pure, so the truth table is testable.
+// editing: nothing executed yet. running: the continuous timer is driving.
+// remaining: at least one instruction left to execute.
+function buttonState({ editing, running, remaining }) {
+  const finished = !editing && !remaining;
+  return {
+    step:  !running && !finished,   // fighting the timer, or nothing left
+    run:   !finished,               // stays live while running: it is Stop
+    reset: !editing,                // nothing to undo yet
+  };
+}
+
 // ---------- tests -------------------------------------------------------
 
 function runTests() {
@@ -195,6 +207,20 @@ function runTests() {
     eq(state.x, 0, 'x'); eq(state.y, 0, 'y'); eq(state.heading, 360, 'heading');
   });
 
+  t('controls disable where they make no sense', () => {
+    const show = s => Object.values(buttonState(s)).map(v => v ? 1 : 0).join('');
+    const cases = [                                      // step run reset
+      ['editing',  { editing:true,  running:false, remaining:false }, '110'],
+      ['paused',   { editing:false, running:false, remaining:true  }, '111'],
+      ['playing',  { editing:false, running:true,  remaining:true  }, '011'],
+      ['finished', { editing:false, running:false, remaining:false }, '001'],
+    ];
+    for (const [name, state, want] of cases) {
+      const got = show(state);
+      if (got !== want) throw new Error(`${name}: got ${got}, want ${want}`);
+    }
+  });
+
   return out;
 }
 
@@ -238,6 +264,17 @@ function main() {
     $('status').textContent = text;
     $('status').classList.toggle('err', !!bad);
   };
+
+  function remaining() {
+    let i = pc;
+    while (i < program.length && program[i].op == null) i++;
+    return i < program.length;
+  }
+
+  function syncButtons() {
+    const on = buttonState({ editing, running, remaining: remaining() });
+    for (const id of ['step', 'run', 'reset']) $(id).disabled = !on[id];
+  }
 
   function drawSegment(s) {
     ink.strokeStyle = '#7ee787';
@@ -324,6 +361,7 @@ function main() {
     running = false;
     clearTimeout(timer);
     $('run').textContent = 'Run';
+    syncButtons();
   }
 
   function tick() {
@@ -345,6 +383,7 @@ function main() {
     $('src').disabled = false;
     drawTurtle();
     setStatus('ready');
+    syncButtons();
   }
 
   $('reset').onclick = reset;
@@ -353,14 +392,15 @@ function main() {
     stop();
     if (editing && !enterRun()) return;
     doStep();
+    syncButtons();
   };
 
   $('run').onclick = () => {
     if (running) return stop();
     if (editing && !enterRun()) return;
-    if (pc >= program.length) return setStatus('done — press Reset');
     running = true;
     $('run').textContent = 'Stop';
+    syncButtons();
     tick();
   };
 

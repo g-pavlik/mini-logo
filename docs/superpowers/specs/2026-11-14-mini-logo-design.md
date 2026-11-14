@@ -133,15 +133,40 @@ Run after an edit.
   centre / heading 0 / pen down, set `pc = 0`, return to edit mode.
 - **Step** — enter run mode if not already in it, execute the instruction
   at `pc`, advance `pc`, move the highlight. At the end of the program the
-  status reads `done` and further presses do nothing.
+  status reads `done`.
 - **Run / Stop** — enter run mode, then advance on a `setTimeout` at the
   current delay. The button reads **Stop** while running and halts the
   timer, leaving `pc` where it is so Step can continue from there.
-  Pressing Run once the program is `done` does nothing; Reset first.
 - **Speed** — `slow` 600 ms, `medium` 200 ms, `fast` 0 ms. The delay is
   read at each tick, so changing speed mid-run takes effect immediately. At
   `fast` the runner executes the remaining program in a single synchronous
   loop rather than scheduling a timer.
+
+### Enablement
+
+A control that cannot do anything useful is disabled, not silently ignored.
+Four states, derived from `editing`, `running` and whether any instruction
+remains, rather than stored as a mode:
+
+- **Editing** — nothing executed yet; the textarea is live.
+- **Paused** — at least one instruction executed, the timer is off.
+- **Playing** — the continuous timer is driving.
+- **Finished** — no instructions left to execute.
+
+|           | Editing | Paused | Playing        | Finished |
+|-----------|---------|--------|----------------|----------|
+| **Step**  | on      | on     | off            | off      |
+| **Run**   | on      | on     | on, as *Stop*  | off      |
+| **Reset** | off     | on     | on             | on       |
+
+Step is off while Playing because it would fight the timer, and off at
+Finished because there is nothing left to run. Run stays on while Playing
+because that is the Stop button. Reset is off only while Editing, when
+there is nothing to undo. The speed selector is always live.
+
+The rule lives in a pure `buttonState({ editing, running, remaining })`
+so the table above is asserted directly rather than poked at through the
+DOM.
 
 ## Errors
 
@@ -178,3 +203,4 @@ Cases:
 - An instruction executed with the pen up returns a `null` segment.
 - A blank line and a comment line each occupy an index, so a three-line
   source with a blank middle line yields a three-entry program.
+- `buttonState` returns the enablement table above for all four states.
