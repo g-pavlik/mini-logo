@@ -52,7 +52,7 @@ speed), current-line highlighting while stepping, and a parse-error report.
 
 ## Architecture
 
-One file: `mini-logo.html`, with inline `<style>` and `<script>`. No CDN
+One file: `index.html`, with inline `<style>` and `<script>`. No CDN
 references, no npm, no build step. It must run from a `file://` URL.
 
 ```
@@ -189,7 +189,7 @@ attempt.
 
 ## Testing
 
-Loading `mini-logo.html?test` runs the assertions and writes pass/fail into
+Loading `index.html?test` runs the assertions and writes pass/fail into
 the page instead of starting the app. No framework, no DOM dependency —
 the assertions call `parse` and `step` directly.
 
