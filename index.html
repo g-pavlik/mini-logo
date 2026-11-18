@@ -58,6 +58,9 @@ main{flex:1;display:flex;min-height:0}
 #listing div.cur{background:var(--cur);box-shadow:inset 3px 0 0 var(--accent)}
 #right{flex:1;position:relative;background:#0b0e13}
 canvas{position:absolute;inset:0}
+/* What the last run drew, left on screen after Reset until the next one. */
+#paper{transition:opacity .25s}
+#paper.ghost{opacity:.35}
 #tests{padding:24px;font:13px/1.8 ui-monospace,Menlo,Consolas,monospace;white-space:pre}
 #tests .ok{color:var(--ink)}
 #tests .no{color:var(--err)}
@@ -502,7 +505,7 @@ function main() {
   // `pending` is the next instruction, pulled but not yet executed. That one
   // instruction of lookahead is what lets the controls know the loop depth
   // before you press anything.
-  let iter = null, pending = null, last = null, lineCount = 0;
+  let iter = null, pending = null, last = null, lineCount = 0, ghost = false;
   let state = null, timer = null, running = false, editing = true;
 
   // ponytail: sized once on load; resizing the window does not re-fit the
@@ -563,23 +566,33 @@ function main() {
     ink.stroke();
   }
 
-  function drawTurtle() {
+  function drawTurtle(ctx, st) {
+    ctx.save();
+    ctx.translate(st.x, st.y);
+    ctx.rotate(st.heading * RAD);
+    ctx.beginPath();
+    ctx.moveTo(0, -13);
+    ctx.lineTo(8, 9);
+    ctx.lineTo(0, 4);
+    ctx.lineTo(-8, 9);
+    ctx.closePath();
+    ctx.fillStyle = st.pen ? '#4ea1ff' : 'transparent';
+    ctx.strokeStyle = '#4ea1ff';
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const paintTurtle = () => {
     nib.clearRect(0, 0, sprite.width, sprite.height);
-    nib.save();
-    nib.translate(state.x, state.y);
-    nib.rotate(state.heading * RAD);
-    nib.beginPath();
-    nib.moveTo(0, -13);
-    nib.lineTo(8, 9);
-    nib.lineTo(0, 4);
-    nib.lineTo(-8, 9);
-    nib.closePath();
-    nib.fillStyle = state.pen ? '#4ea1ff' : 'transparent';
-    nib.strokeStyle = '#4ea1ff';
-    nib.lineWidth = 1.5;
-    nib.fill();
-    nib.stroke();
-    nib.restore();
+    drawTurtle(nib, state);
+  };
+
+  function clearPaper() {
+    ink.clearRect(0, 0, paper.width, paper.height);
+    paper.classList.remove('ghost');
+    ghost = false;
   }
 
   function highlight(line) {
@@ -594,7 +607,7 @@ function main() {
   // Everything the eye needs, done once rather than per instruction, so a
   // burst of thousands of steps does not repaint thousands of times.
   function paint() {
-    drawTurtle();
+    paintTurtle();
     if (last) highlight(last.line);
     setStatus(pending ? describe(last) : 'done');
   }
@@ -621,6 +634,7 @@ function main() {
     }));
     $('editor').hidden = true;
     $('listing').hidden = false;
+    if (ghost) clearPaper();
     iter = walk(body);
     pending = iter.next().value ?? null;
     editing = false;
@@ -670,15 +684,24 @@ function main() {
     timer = setTimeout(tick, DELAYS[$('speed').value]);
   }
 
+  // Reset keeps what the last run drew, dimmed, so you can still see where the
+  // program got to. Starting again clears it. A second Reset leaves it alone:
+  // `last` is already null, and the class cannot dim twice.
   function reset() {
     stop();
-    ink.clearRect(0, 0, paper.width, paper.height);
+    if (last) {
+      drawTurtle(ink, state);        // stamp the final turtle onto the path layer
+      paper.classList.add('ghost');
+      ghost = true;
+    } else if (!ghost) {
+      clearPaper();
+    }
     iter = null; pending = null; last = null;
     state = home(); editing = true;
     $('listing').hidden = true;
     $('editor').hidden = false;
     paintMirror();
-    drawTurtle();
+    paintTurtle();
     setStatus('ready');
     syncButtons();
   }

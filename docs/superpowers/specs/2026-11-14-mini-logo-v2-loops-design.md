@@ -266,6 +266,26 @@ special case. Step Out stays off in Editing deliberately: you must take at
 least one Step to be inside a loop, and that keeps the control from having
 to compile the source itself.
 
+### Reset
+
+Reset stops the timer, discards the generator, returns the turtle to the
+centre at heading 0 with the pen down, and goes back to edit mode.
+
+It does **not** clear the drawing. What the last run produced stays on
+screen at 35% opacity, with the turtle's final position stamped onto the
+path layer just before the fade, so both the trace and where the program
+got to remain visible. The next Step or Run clears it.
+
+Dimming is a class on the path canvas, not the canvas composited onto
+itself at reduced alpha. A class cannot dim twice, so pressing Reset
+repeatedly leaves the ghost at exactly one depth, with no flag to get
+wrong. The live turtle lives on the other canvas and so stays at full
+strength at home.
+
+The ghost is cleared inside `enterRun`, after the parse succeeds. A program
+that fails to parse has not started, and must not wipe what you were
+looking at.
+
 ## Errors
 
 Existing V1 messages stand, minus "too many words", which is no longer an
